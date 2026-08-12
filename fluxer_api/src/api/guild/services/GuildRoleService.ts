@@ -228,7 +228,7 @@ export class GuildRoleService {
 			hoist_position: updateData.hoistPosition !== undefined ? updateData.hoistPosition : role.hoistPosition,
 			permissions: updateData.permissions ?? role.permissions,
 			icon_hash: updateData.iconHash ?? role.iconHash,
-			unicode_emoji: updateData.unicodeEmoji ?? role.unicodeEmoji,
+			unicode_emoji: updateData.unicodeEmoji !== undefined ? updateData.unicodeEmoji : role.unicodeEmoji,
 			hoist: updateData.hoist ?? role.isHoisted,
 			mentionable: updateData.mentionable ?? role.isMentionable,
 		};
@@ -541,6 +541,9 @@ export class GuildRoleService {
 		}
 		if (data.mentionable !== undefined && !isEveryoneRole) {
 			updateData.mentionable = data.mentionable;
+		}
+		if (data.unicode_emoji !== undefined && !isEveryoneRole) {
+			updateData.unicodeEmoji = data.unicode_emoji;
 		}
 		if (data.permissions !== undefined) {
 			updateData.permissions = await this.resolveRequestedPermissions({

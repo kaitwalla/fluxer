@@ -107,6 +107,7 @@ export function mapGuildRoleToResponse(role: GuildRole): z.infer<typeof GuildRol
 		permissions: role.permissions.toString(),
 		hoist: role.isHoisted,
 		mentionable: role.isMentionable,
+		unicode_emoji: role.unicodeEmoji,
 	};
 }
 
