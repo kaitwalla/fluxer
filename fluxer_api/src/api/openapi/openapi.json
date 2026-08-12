@@ -29398,7 +29398,11 @@
 						"anyOf": [{"type": "integer", "format": "int53"}, {"type": "null"}],
 						"description": "The position of the role in the hoisted member list"
 					},
-					"mentionable": {"type": "boolean", "description": "Whether the role can be mentioned by anyone"}
+					"mentionable": {"type": "boolean", "description": "Whether the role can be mentioned by anyone"},
+					"unicode_emoji": {
+						"anyOf": [{"type": "string"}, {"type": "null"}],
+						"description": "The unicode emoji for this role"
+					}
 				}
 			},
 			"GuildStickerCreateRequest": {
