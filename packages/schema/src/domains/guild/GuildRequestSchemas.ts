@@ -18,6 +18,7 @@ import {SudoVerificationSchema} from '@fluxer/schema/src/domains/auth/AuthSchema
 import {GuildFeatureSchema} from '@fluxer/schema/src/domains/guild/GuildResponseSchemas';
 import {TemplateSerializedGuild} from '@fluxer/schema/src/domains/guild/GuildTemplateSchemas';
 import {VanityURLCodeType} from '@fluxer/schema/src/primitives/ChannelValidators';
+import {isValidSingleUnicodeEmoji} from '@fluxer/schema/src/primitives/EmojiValidators';
 import {createBase64StringType} from '@fluxer/schema/src/primitives/FileValidators';
 import {
 	ContentWarningLevelSchema,
@@ -198,6 +199,11 @@ export const GuildRoleUpdateRequest = z.object({
 	hoist: z.boolean().optional().describe('Whether the role should be displayed separately in the member list'),
 	hoist_position: z.number().int().nullish().describe('The position of the role in the hoisted member list'),
 	mentionable: z.boolean().optional().describe('Whether the role can be mentioned by anyone'),
+	unicode_emoji: z
+		.string()
+		.nullish()
+		.refine((value) => value == null || isValidSingleUnicodeEmoji(value), 'Must be a single Unicode emoji')
+		.describe('The unicode emoji for this role'),
 });
 
 export type GuildRoleUpdateRequest = z.infer<typeof GuildRoleUpdateRequest>;

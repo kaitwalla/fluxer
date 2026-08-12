@@ -17,6 +17,7 @@ import {
 	deleteRole,
 	getChannel,
 	getRoles,
+	updateRole,
 	updateRolePositions,
 } from './GuildTestUtils';
 
@@ -90,6 +91,45 @@ describe('Guild Role Operations', () => {
 			unicode_emoji: '',
 		});
 		expect(role.name).toBe('Emoji Role');
+	});
+	test('should set and clear a role unicode emoji', async () => {
+		const account = await createTestAccount(harness);
+		const guild = await createGuild(harness, account.token, 'Test Guild');
+		const role = await createRole(harness, account.token, guild.id, {name: 'Emoji Role'});
+		const updatedRole = await updateRole(harness, account.token, guild.id, role.id, {unicode_emoji: '❤️'});
+		expect(updatedRole.unicode_emoji).toBe('❤️');
+		let persistedRole = (await getRoles(harness, account.token, guild.id)).find((item) => item.id === role.id);
+		expect(persistedRole?.unicode_emoji).toBe('❤️');
+		await updateRole(harness, account.token, guild.id, role.id, {unicode_emoji: null});
+		persistedRole = (await getRoles(harness, account.token, guild.id)).find((item) => item.id === role.id);
+		expect(persistedRole?.unicode_emoji).toBeNull();
+	});
+	test('should reject ordinary text as a role unicode emoji', async () => {
+		const account = await createTestAccount(harness);
+		const guild = await createGuild(harness, account.token, 'Test Guild');
+		const role = await createRole(harness, account.token, guild.id, {name: 'Emoji Role'});
+		await createBuilder(harness, account.token)
+			.patch(`/guilds/${guild.id}/roles/${role.id}`)
+			.body({unicode_emoji: 'not an emoji'})
+			.expect(HTTP_STATUS.BAD_REQUEST)
+			.execute();
+	});
+	test('should reject multiple role unicode emoji', async () => {
+		const account = await createTestAccount(harness);
+		const guild = await createGuild(harness, account.token, 'Test Guild');
+		const role = await createRole(harness, account.token, guild.id, {name: 'Emoji Role'});
+		await createBuilder(harness, account.token)
+			.patch(`/guilds/${guild.id}/roles/${role.id}`)
+			.body({unicode_emoji: '👍🎉'})
+			.expect(HTTP_STATUS.BAD_REQUEST)
+			.execute();
+	});
+	test('should ignore unicode emoji updates for the @everyone role', async () => {
+		const account = await createTestAccount(harness);
+		const guild = await createGuild(harness, account.token, 'Test Guild');
+		await updateRole(harness, account.token, guild.id, guild.id, {unicode_emoji: '❤️'});
+		const everyoneRole = (await getRoles(harness, account.token, guild.id)).find((role) => role.id === guild.id);
+		expect(everyoneRole?.unicode_emoji).toBeNull();
 	});
 	test('should validate role name length', async () => {
 		const account = await createTestAccount(harness);
