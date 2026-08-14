@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import {ListJobsRequest} from '@fluxer/schema/src/domains/admin/JobsSchemas';
+import {JobLedgerEntrySchema, ListJobsRequest} from '@fluxer/schema/src/domains/admin/JobsSchemas';
+import {createSnowflakeFromTimestamp} from '@fluxer/snowflake';
+import type {IWorkerService} from '@pkgs/worker/src/contracts/IWorkerService';
 import {seconds} from 'itty-time';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {fetchMany, fetchOne, setCassandraQueryExecutorForTesting, upsertOne} from '../database/CassandraQueryExecution';
@@ -8,6 +10,7 @@ import {type CassandraParams, Db, type KvQueryMeta, type PreparedQuery} from '..
 import type {JobActiveRow, JobActiveV2Row, JobByDayBucketRow, JobByIdRow} from '../database/types/JobLedgerTypes';
 import {JobsActive, JobsActiveLegacy, JobsByDayBucket, JobsById} from '../Tables';
 import {InMemoryCassandraQueryExecutor} from '../test/InMemoryCassandraQueryExecutor';
+import {JobAdminService} from './JobAdminService';
 import {JOB_HISTORY_RETENTION_SECONDS, JobLedgerRepository} from './JobLedgerRepository';
 
 interface RecordedBatchQuery {
@@ -19,6 +22,7 @@ interface RecordedBatchQuery {
 class RecordingExecutor extends InMemoryCassandraQueryExecutor {
 	readonly batchQueries: Array<RecordedBatchQuery> = [];
 	readonly queries: Array<PreparedQuery> = [];
+	readonly legacyJobColumns = new Map<bigint, Set<string>>();
 	beforeConditional: (() => Promise<void>) | null = null;
 	afterConditional: (() => Promise<void>) | null = null;
 	onActiveUpsert: (() => Promise<void>) | null = null;
@@ -44,6 +48,15 @@ class RecordingExecutor extends InMemoryCassandraQueryExecutor {
 			await hook();
 		}
 		const result = await super.executeQuery<T>(query);
+		if (query.kvMeta?.table.name === 'jobs_by_id' && query.kvMeta.action === 'select') {
+			for (const item of result as Array<Record<string, unknown>>) {
+				const presentColumns = this.legacyJobColumns.get(item['job_id'] as bigint);
+				if (!presentColumns) continue;
+				for (const [key, value] of Object.entries(item)) {
+					if (value === null && !presentColumns.has(key)) delete item[key];
+				}
+			}
+		}
 		if ((query.kvMeta?.condition || query.kvMeta?.conditions) && this.afterConditional) {
 			const hook = this.afterConditional;
 			this.afterConditional = null;
@@ -132,6 +145,88 @@ describe('JobLedgerRepository', () => {
 				},
 			}),
 		).toMatchObject({success: false});
+	});
+
+	it('hydrates a legacy history row from its day-bucket metadata', async () => {
+		const createdAt = new Date('2026-08-10T12:34:56.000Z');
+		const jobId = createSnowflakeFromTimestamp(createdAt.getTime());
+		await insertLegacyJob(jobId, {payload: '{"legacy":true}'});
+		await upsertOne(
+			JobsByDayBucket.upsertAll({
+				bucket_day: '2026-08-10',
+				created_at: createdAt,
+				job_id: jobId,
+				task_type: 'legacyHistoryTask',
+				status: 'succeeded',
+				requested_by_user_id: 987n,
+			}),
+		);
+
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-08-10T23:00:00.000Z'));
+		const result = await repository.listJobs({limit: 10, cursor: null, filters: {}, maxLookbackDays: 1});
+
+		expect(result.jobs).toHaveLength(1);
+		expect(result.jobs[0]).toMatchObject({
+			job_id: jobId,
+			created_at: createdAt,
+			task_type: 'legacyHistoryTask',
+			status: 'succeeded',
+			requested_by_user_id: 987n,
+			attempts: 0,
+			cancel_requested: false,
+		});
+	});
+
+	it('hydrates a legacy active row from its active-v2 metadata', async () => {
+		const createdAt = new Date('2026-08-11T01:02:03.000Z');
+		const jobId = createSnowflakeFromTimestamp(createdAt.getTime());
+		await insertLegacyJob(jobId, {});
+		await upsertOne(
+			JobsActive.upsertAll({
+				shard: Number(jobId % 64n),
+				job_id: jobId,
+				task_type: 'legacyActiveTask',
+				status: 'running',
+				requested_by_user_id: 654n,
+				created_at: createdAt,
+				started_at: new Date('2026-08-11T01:03:00.000Z'),
+			}),
+		);
+
+		const result = await repository.listActiveJobs({limit: 10, pageState: null});
+
+		expect(result.jobs).toHaveLength(1);
+		expect(result.jobs[0]).toMatchObject({
+			job_id: jobId,
+			created_at: createdAt,
+			task_type: 'legacyActiveTask',
+			status: 'running',
+			requested_by_user_id: 654n,
+			started_at: new Date('2026-08-11T01:03:00.000Z'),
+		});
+	});
+
+	it('returns and serializes a schema-valid legacy detail row using its snowflake timestamp', async () => {
+		const createdAt = new Date('2026-08-12T04:05:06.000Z');
+		const jobId = createSnowflakeFromTimestamp(createdAt.getTime());
+		await insertLegacyJob(jobId, {task_type: 'presentTask', status: 'failed', requested_by_user_id: null});
+
+		const row = await repository.getJob(jobId);
+		expect(row).toMatchObject({
+			job_id: jobId,
+			created_at: createdAt,
+			task_type: 'presentTask',
+			status: 'failed',
+			requested_by_user_id: null,
+			attempts: 0,
+			max_attempts: 1,
+			cancel_requested: false,
+		});
+
+		const service = new JobAdminService(repository, {} as IWorkerService);
+		const detail = await service.getJob(jobId);
+		expect(JobLedgerEntrySchema.safeParse(detail?.job)).toMatchObject({success: true});
 	});
 
 	it('bounds active-index reads and authority hydration with an opaque continuation', async () => {
@@ -1048,6 +1143,11 @@ async function createQueuedJob(jobId: bigint, runAt: Date | null): Promise<void>
 		runAt,
 		taskType: 'flushUserActivityBuffer',
 	});
+}
+
+async function insertLegacyJob(jobId: bigint, values: Partial<JobByIdRow>): Promise<void> {
+	executor.legacyJobColumns.set(jobId, new Set(['job_id', ...Object.keys(values)]));
+	await upsertOne(JobsById.upsertAll({job_id: jobId, ...values} as JobByIdRow));
 }
 
 async function collectAllActiveJobs(limit = 200): Promise<Array<JobByIdRow>> {

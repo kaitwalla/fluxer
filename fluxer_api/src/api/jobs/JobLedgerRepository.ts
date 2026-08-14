@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {randomUUID} from 'node:crypto';
+import {snowflakeToDate} from '@fluxer/snowflake';
 import {seconds} from 'itty-time';
 import {
 	BatchBuilder,
@@ -47,6 +48,7 @@ export const JOB_HISTORY_RETENTION_SECONDS = seconds('7 days');
 const TERMINAL_JOB_STATUSES = new Set<JobStatus>(['succeeded', 'failed', 'cancelled', 'deadletter']);
 type JobByIdPatch = Parameters<typeof JobsById.patchByPk>[1];
 type JobByIdCondition = Parameters<typeof JobsById.patchByPkIf>[2];
+type JobIndexMetadata = Pick<JobByIdRow, 'created_at' | 'task_type' | 'status' | 'requested_by_user_id' | 'started_at'>;
 
 function bucketDayFor(d: Date): string {
 	return d.toISOString().slice(0, 10);
@@ -186,7 +188,52 @@ export class JobLedgerRepository extends IJobLedgerRepository {
 	}
 
 	async getJob(jobId: bigint): Promise<JobByIdRow | null> {
-		return fetchOne<JobByIdRow>(FETCH_JOB_BY_ID_QUERY.bind({job_id: jobId}));
+		return this.fetchJob(jobId);
+	}
+
+	private async fetchJob(jobId: bigint, indexMetadata?: Partial<JobIndexMetadata>): Promise<JobByIdRow | null> {
+		const row = await fetchOne<Partial<JobByIdRow> & Pick<JobByIdRow, 'job_id'>>(
+			FETCH_JOB_BY_ID_QUERY.bind({job_id: jobId}),
+		);
+		if (!row) return null;
+		return this.completeLegacyRow(row, indexMetadata);
+	}
+
+	private completeLegacyRow(
+		row: Partial<JobByIdRow> & Pick<JobByIdRow, 'job_id'>,
+		indexMetadata?: Partial<JobIndexMetadata>,
+	): JobByIdRow {
+		return {
+			job_id: row.job_id,
+			task_type: row.task_type === undefined ? (indexMetadata?.task_type ?? 'legacy') : row.task_type,
+			status: row.status === undefined ? (indexMetadata?.status ?? 'failed') : row.status,
+			progress_current: row.progress_current === undefined ? null : row.progress_current,
+			progress_total: row.progress_total === undefined ? null : row.progress_total,
+			progress_message: row.progress_message === undefined ? null : row.progress_message,
+			payload: row.payload === undefined ? null : row.payload,
+			result: row.result === undefined ? null : row.result,
+			error_message: row.error_message === undefined ? null : row.error_message,
+			created_at:
+				row.created_at === undefined ? (indexMetadata?.created_at ?? snowflakeToDate(row.job_id)) : row.created_at,
+			state_changed_at: row.state_changed_at === undefined ? null : row.state_changed_at,
+			started_at: row.started_at === undefined ? (indexMetadata?.started_at ?? null) : row.started_at,
+			completed_at: row.completed_at === undefined ? null : row.completed_at,
+			requested_by_user_id:
+				row.requested_by_user_id === undefined
+					? (indexMetadata?.requested_by_user_id ?? null)
+					: row.requested_by_user_id,
+			audit_log_reason: row.audit_log_reason === undefined ? null : row.audit_log_reason,
+			jet_stream_seq: row.jet_stream_seq === undefined ? null : row.jet_stream_seq,
+			jet_stream_lane: row.jet_stream_lane === undefined ? null : row.jet_stream_lane,
+			lease_token: row.lease_token === undefined ? null : row.lease_token,
+			lease_expires_at: row.lease_expires_at === undefined ? null : row.lease_expires_at,
+			dlq_attempts: row.dlq_attempts === undefined ? 0 : row.dlq_attempts,
+			attempts: row.attempts === undefined ? 0 : row.attempts,
+			max_attempts: row.max_attempts === undefined ? 1 : row.max_attempts,
+			run_at: row.run_at === undefined ? null : row.run_at,
+			cancel_requested: row.cancel_requested === undefined ? false : row.cancel_requested,
+			context_link: row.context_link === undefined ? null : row.context_link,
+		};
 	}
 
 	private async wasApplied(query: ReturnType<typeof JobsById.patchByPkIf>): Promise<boolean> {
@@ -716,7 +763,7 @@ export class JobLedgerRepository extends IJobLedgerRepository {
 				}
 				const bucketRows = await fetchMany<JobByDayBucketRow>(query.bind(params));
 				for (const bucketRow of bucketRows) {
-					const fullRow = await this.getJob(bucketRow.job_id);
+					const fullRow = await this.fetchJob(bucketRow.job_id, bucketRow);
 					if (!fullRow) continue;
 					if (filters.status && fullRow.status !== filters.status) continue;
 					if (filters.taskType && fullRow.task_type !== filters.taskType) continue;
@@ -865,7 +912,7 @@ export class JobLedgerRepository extends IJobLedgerRepository {
 			nextPageState = this.encodeActiveCursor(shard, null, input.taskType ?? null);
 		}
 		const matching = input.taskType ? pageRows.filter((row) => row.task_type === input.taskType) : pageRows;
-		const fullRows = await Promise.all(matching.map((row) => this.getJob(row.job_id)));
+		const fullRows = await Promise.all(matching.map((row) => this.fetchJob(row.job_id, row)));
 		return {
 			jobs: fullRows.filter((row): row is JobByIdRow => row !== null && !TERMINAL_JOB_STATUSES.has(row.status)),
 			nextPageState,
